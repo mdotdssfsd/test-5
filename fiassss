@@ -1,4 +1,4 @@
-
+-- Services
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -323,9 +323,12 @@ local function switchTab(selectedTab)
     end
     for name, button in pairs(navButtons) do
         local isActive = (name == selectedTab)
-        button.Indicator.Visible = isActive
-        button.Label.TextColor3 = isActive and THEME.TextPrimary or THEME.TextSecondary
-        button.Icon.ImageColor3 = isActive and THEME.AccentGreen or THEME.TextSecondary
+        local indicator = button:FindFirstChild("Indicator")
+        local label = button:FindFirstChild("Label")
+        local icon = button:FindFirstChild("Icon")
+        if indicator then indicator.Visible = isActive end
+        if label then label.TextColor3 = isActive and THEME.TextPrimary or THEME.TextSecondary end
+        if icon then icon.ImageColor3 = isActive and THEME.AccentGreen or THEME.TextSecondary end
     end
     HeaderTitle.Text = selectedTab == "SMOOVE" and "Smoove Users" or (selectedTab:sub(1,1):upper() .. selectedTab:sub(2):lower())
     HeaderSub.Text = tabSubtitles[selectedTab] or "controls"
@@ -1403,8 +1406,18 @@ createToggle("COMBAT", "KA Predictive Aim", false, true, 20, function(state) Fea
 
 createSectionHeader("STATS", "PLAYER", 1)
 createSlider("STATS", "Hitbox Size", 1, 10, 1, false, 2, function(val) FeatureState.HitboxSize = val refreshTargetBoxes() end)
-createToggle("STATS", "Punch Speed", false, false, 3, function(state) FeatureState.PunchSpeed = state end)
-createSlider("STATS", "Punch Speed Value", 1, 10, 1.7, false, 4, function(val) FeatureState.PunchSpeedValue = val end)createSlider("STATS", "Down Hit Speed", 1, 10, 1, true, 7, function(val) FeatureState.DownHitSpeed = val end)
+createToggle("STATS", "Punch Speed", false, false, 3, function(state)
+    FeatureState.PunchSpeed = state
+    updateAnimationSpeeds()
+end)
+createSlider("STATS", "Punch Speed Value", 1, 10, 1.7, false, 4, function(val)
+    FeatureState.PunchSpeedValue = val
+    updateAnimationSpeeds()
+end)
+
+createSlider("STATS", "Down Hit Speed", 1, 10, 1, true, 7, function(val)
+    FeatureState.DownHitSpeed = val
+end)
 createSlider("STATS", "Weave Glide Strength", 1, 10, 2.2, false, 8, function(val) FeatureState.WeaveGlideStrength = val end)
 
 createSectionHeader("STATS", "CAMERA", 9)
@@ -1568,7 +1581,8 @@ end)
 createSectionHeader("UTILITY", "DANGER", 10)
 
 createActionButton("UTILITY", "Kill Switch", THEME.AccentRed, 11, function()
-    ScreenGui:Destroy()
+    if MainFrame then MainFrame.Visible = false end
+    updateMobileButton()
     if LocalPlayer and LocalPlayer.Character then
         local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if humanoid then
@@ -1844,4 +1858,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 end)
 
 -- Default to Combat Tab View
+for _, frame in pairs(tabFrames) do
+    frame.Visible = false
+end
 switchTab("COMBAT")
+updateMobileButton()
