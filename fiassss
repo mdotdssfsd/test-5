@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
+local Lighting = game:GetService("Lighting")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -17,15 +18,15 @@ end
 
 -- Theme Colors (Joker Theme: Green, White, Crimson Red, Black)
 local THEME = {
-    Background = Color3.fromRGB(12, 12, 14),
-    SidebarBg = Color3.fromRGB(18, 18, 22),
-    CardBg = Color3.fromRGB(24, 24, 30),
-    AccentGreen = Color3.fromRGB(0, 230, 115),     -- Joker Emerald Green
-    AccentRed = Color3.fromRGB(220, 35, 60),       -- Joker Crimson Red
-    TextPrimary = Color3.fromRGB(255, 255, 255),   -- Crisp White
-    TextSecondary = Color3.fromRGB(160, 160, 175), -- Muted White/Grey
-    BorderGreen = Color3.fromRGB(0, 180, 90),
-    DarkTrack = Color3.fromRGB(30, 30, 36)
+    Background = Color3.fromRGB(10, 7, 8),
+    SidebarBg = Color3.fromRGB(18, 8, 10),
+    CardBg = Color3.fromRGB(28, 10, 13),
+    AccentGreen = Color3.fromRGB(210, 20, 35),
+    AccentRed = Color3.fromRGB(255, 45, 55),
+    TextPrimary = Color3.fromRGB(255, 245, 245),
+    TextSecondary = Color3.fromRGB(175, 135, 140),
+    BorderGreen = Color3.fromRGB(130, 10, 20),
+    DarkTrack = Color3.fromRGB(45, 12, 16)
 }
 
 -- Destroy previous UI instances if executed multiple times
@@ -312,7 +313,7 @@ local tabSubtitles = {
     ["SMOOVE"] = "live community presence",
     ["UTILITY"] = "utility controls",
     ["CONFIGS"] = "configuration profiles",
-    ["FARM"] = "automation options",
+    ["WORLD"] = "world visuals",
     ["SETTINGS"] = "ui settings"
 }
 
@@ -379,7 +380,7 @@ local tabs = {
     {"SMOOVE", "rbxassetid://6031075931"},
     {"UTILITY", "rbxassetid://6031075931"},
     {"CONFIGS", "rbxassetid://6031260812"},
-    {"FARM", "rbxassetid://6034503378"},
+    {"WORLD", "rbxassetid://6034503378"},
     {"SETTINGS", "rbxassetid://6031280882"}
 }
 
@@ -729,6 +730,7 @@ end
 
 ---------------------------------------------------------
 -- FUNCTIONAL FEATURE RUNTIME
+-- No Attack Delay is not an animation-speed hack; it leaves movement animations untouched.
 -- Client-side implementation. Game-specific server combat
 -- remotes are intentionally not guessed.
 ---------------------------------------------------------
@@ -775,7 +777,7 @@ local FeatureState = {
 }
 
 local hitboxFolder = Instance.new("Folder")
-hitboxFolder.Name = "5SmooveHub_Hitboxes"
+hitboxFolder.Name = "5SmooveHub_HitboxVisualizer"
 hitboxFolder.Parent = workspace
 
 local targetBoxes = {}
@@ -800,11 +802,44 @@ local function isAlive(player)
 end
 
 local function clearTargetBox(player)
-    local box = targetBoxes[player]
-    if box then
-        box:Destroy()
+    local data = targetBoxes[player]
+    if data then
+        if data.part then data.part:Destroy() end
+        if data.highlight then data.highlight:Destroy() end
         targetBoxes[player] = nil
     end
+end
+
+local function makeHitboxVisual(player)
+    local root = getRoot(player)
+    local character = getCharacter(player)
+    if not root or not character then return nil end
+
+    local part = Instance.new("Part")
+    part.Name = "HitboxVolume_" .. player.UserId
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanTouch = false
+    part.CanQuery = false
+    part.CastShadow = false
+    part.Material = Enum.Material.ForceField
+    part.Transparency = 0.82
+    part.Color = FeatureState.HitboxColor
+    part.Parent = hitboxFolder
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "HitboxOutline_" .. player.UserId
+    highlight.Adornee = character
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = 1
+    highlight.OutlineTransparency = 0.05
+    highlight.OutlineColor = FeatureState.HitboxColor
+    highlight.Parent = hitboxFolder
+
+    return {
+        part = part,
+        highlight = highlight
+    }
 end
 
 local function updateTargetBox(player)
@@ -814,28 +849,45 @@ local function updateTargetBox(player)
     end
 
     local root = getRoot(player)
-    if not root then
+    local character = getCharacter(player)
+    if not root or not character then
         clearTargetBox(player)
         return
     end
 
-    local box = targetBoxes[player]
-    if not box or not box.Parent then
-        box = Instance.new("BoxHandleAdornment")
-        box.Name = "Hitbox_" .. player.UserId
-        box.Adornee = root
-        box.AlwaysOnTop = true
-        box.ZIndex = 10
-        box.Transparency = 0.45
-        box.Parent = hitboxFolder
-        targetBoxes[player] = box
+    local data = targetBoxes[player]
+    if not data or not data.part or not data.part.Parent then
+        clearTargetBox(player)
+        data = makeHitboxVisual(player)
+        if not data then return end
+        targetBoxes[player] = data
     end
 
-    -- Re-assign Adornee every refresh so respawns are handled.
-    box.Adornee = root
-    local size = math.clamp(2.5 * FeatureState.HitboxSize, 2.5, 25)
-    box.Size = Vector3.new(size, size, size)
-    box.Color3 = FeatureState.HitboxColor
+    local ok, bodySize = pcall(function()
+        return character:GetExtentsSize()
+    end)
+    if not ok then
+        bodySize = Vector3.new(2, 5, 2)
+    end
+
+    -- Horizontal expansion is stronger than vertical expansion so the
+    -- visual is useful for judging melee reach without becoming enormous.
+    local scale = math.clamp(tonumber(FeatureState.HitboxSize) or 1, 1, 10)
+    local horizontal = 1 + ((scale - 1) * 0.50)
+    local vertical = 1 + ((scale - 1) * 0.30)
+
+    local size = Vector3.new(
+        math.clamp(bodySize.X * horizontal, 2.5, 18),
+        math.clamp(bodySize.Y * vertical, 4, 16),
+        math.clamp(bodySize.Z * horizontal, 2.5, 18)
+    )
+
+    data.part.Size = size
+    data.part.CFrame = root.CFrame * CFrame.new(0, bodySize.Y * 0.05, 0)
+    data.part.Color = FeatureState.HitboxColor
+
+    data.highlight.Adornee = character
+    data.highlight.OutlineColor = FeatureState.HitboxColor
 end
 
 local function refreshTargetBoxes()
@@ -844,17 +896,15 @@ local function refreshTargetBoxes()
     end
 end
 
-
 local function setCameraSensitivity()
-    -- Roblox does not expose a public writable Camera sensitivity property.
-    -- Keep the selected value in FeatureState rather than pretending it changed.
+    local value = math.clamp(tonumber(FeatureState.Sensitivity) or 1, 0.1, 10)
+    pcall(function()
+        UserInputService.MouseDeltaSensitivity = FeatureState.CustomSens and value or 1
+    end)
 end
 
 local function getAnimationMultiplier()
     local multiplier = FeatureState.PunchSpeed and FeatureState.PunchSpeedValue or 1
-    if FeatureState.NoAttackDelay then
-        multiplier = math.max(multiplier, 2)
-    end
     return math.clamp(multiplier, 0.05, 20)
 end
 
@@ -886,9 +936,76 @@ local function connectCharacterRuntime(character)
     end
 end
 
+local function isAttackAnimation(track)
+    if not track then
+        return false
+    end
+
+    local name = string.lower(track.Name or "")
+    local animation = track.Animation
+    local id = animation and string.lower(animation.AnimationId or "") or ""
+
+    -- Only classify likely combat/attack tracks. Movement/idle tracks
+    -- intentionally never match these patterns.
+    local attackWords = {
+        "punch", "attack", "hit", "jab", "swing", "kick",
+        "combo", "m1", "melee", "strike", "stomp", "slam"
+    }
+
+    for _, word in ipairs(attackWords) do
+        if string.find(name, word, 1, true) or string.find(id, word, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getAnimationMultiplier()
+    -- NoAttackDelay intentionally does NOT modify animation speed.
+    -- Server-side attack cooldowns cannot be removed by changing animation playback.
+    local multiplier = FeatureState.PunchSpeed and FeatureState.PunchSpeedValue or 1
+    return math.clamp(multiplier, 0.05, 20)
+end
+
+local function applyAnimationSpeed(track)
+    if not isAttackAnimation(track) then
+        return
+    end
+
+    pcall(function()
+        track:AdjustSpeed(getAnimationMultiplier())
+    end)
+end
+
+local animationConnection
+local function connectCharacterRuntime(character)
+    if animationConnection then
+        animationConnection:Disconnect()
+        animationConnection = nil
+    end
+
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        return
+    end
+
+    animationConnection = humanoid.AnimationPlayed:Connect(function(track)
+        task.defer(function()
+            applyAnimationSpeed(track)
+        end)
+    end)
+
+    for _, track in ipairs(humanoid:GetPlayingAnimationTracks()) do
+        applyAnimationSpeed(track)
+    end
+end
+
 local function updateAnimationSpeeds()
     local humanoid = LocalPlayer and getHumanoid(LocalPlayer)
-    if not humanoid then return end
+    if not humanoid then
+        return
+    end
 
     for _, track in ipairs(humanoid:GetPlayingAnimationTracks()) do
         applyAnimationSpeed(track)
@@ -900,8 +1017,139 @@ if LocalPlayer then
         task.wait(0.2)
         connectCharacterRuntime(character)
     end)
+
     if LocalPlayer.Character then
         connectCharacterRuntime(LocalPlayer.Character)
+    end
+end
+
+
+---------------------------------------------------------
+-- AUTO STOMP / MOBILE BUTTON ADAPTER
+-- Detects a downed humanoid and activates the game's own
+-- mobile Stomp button when that button is available.
+-- It does not guess or fire arbitrary remotes.
+---------------------------------------------------------
+
+local AutoStompState = {
+    target = nil,
+    downed = false,
+    distance = 0,
+    button = nil,
+    lastPress = 0,
+    cooldown = 0.35,
+}
+
+local function isDownedCharacter(character)
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+
+    -- Support common downed/ragdoll markers used by Roblox games.
+    local downedNames = {
+        "Downed", "Down", "Knocked", "KnockedDown",
+        "Ragdoll", "IsDowned", "DownedState"
+    }
+
+    for _, name in ipairs(downedNames) do
+        local marker = character:FindFirstChild(name)
+        if marker then
+            if marker:IsA("BoolValue") and marker.Value then return true end
+            if marker:IsA("IntValue") or marker:IsA("NumberValue") then
+                if marker.Value > 0 then return true end
+            end
+            if marker:IsA("StringValue") and marker.Value ~= "" then return true end
+        end
+    end
+
+    -- Humanoid states commonly used while a character is physically down.
+    local state = humanoid:GetState()
+    return state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.Ragdoll
+end
+
+local function findMobileStompButton()
+    local playerGui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return nil end
+
+    for _, obj in ipairs(playerGui:GetDescendants()) do
+        if obj:IsA("GuiButton") and obj.Visible then
+            local text = string.lower(tostring(obj.Text or ""))
+            local name = string.lower(obj.Name or "")
+
+            if string.find(text, "stomp", 1, true)
+                or string.find(name, "stomp", 1, true) then
+                return obj
+            end
+        end
+    end
+
+    return nil
+end
+
+local function pressMobileStomp()
+    local now = os.clock()
+    if now - AutoStompState.lastPress < AutoStompState.cooldown then
+        return false
+    end
+
+    local button = AutoStompState.button
+    if not button or not button.Parent or not button.Visible then
+        button = findMobileStompButton()
+        AutoStompState.button = button
+    end
+
+    if not button then
+        return false
+    end
+
+    local ok = pcall(function()
+        button:Activate()
+    end)
+
+    if ok then
+        AutoStompState.lastPress = now
+        return true
+    end
+
+    return false
+end
+
+local function updateAutoStomp()
+    AutoStompState.target = nil
+    AutoStompState.downed = false
+    AutoStompState.distance = 0
+
+    if not FeatureState.AutoStomp then
+        return
+    end
+
+    local myRoot = getRoot(LocalPlayer)
+    if not myRoot then return end
+
+    local closest, closestDistance
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and isAlive(player) then
+            local root = getRoot(player)
+            local character = getCharacter(player)
+
+            if root and character and isDownedCharacter(character) then
+                local distance = (root.Position - myRoot.Position).Magnitude
+                if distance <= 15 and (not closestDistance or distance < closestDistance) then
+                    closest = player
+                    closestDistance = distance
+                end
+            end
+        end
+    end
+
+    AutoStompState.target = closest
+    AutoStompState.downed = closest ~= nil
+    AutoStompState.distance = closestDistance or 0
+
+    if closest then
+        pressMobileStomp()
     end
 end
 
@@ -1014,6 +1262,7 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 RunService.Heartbeat:Connect(function()
+    updateAutoStomp()
     refreshTargetBoxes()
     updateAnimationSpeeds()
     updateKillAuraTarget()
@@ -1418,13 +1667,19 @@ createSectionHeader("COMBAT", "CORE", 1)
 createToggle("COMBAT", "Anti Weave Stun", false, false, 2, function(state) FeatureState.AntiWeaveStun = state end)
 createToggle("COMBAT", "Show Hitbox", true, false, 3, function(state) FeatureState.ShowHitbox = state refreshTargetBoxes() end)
 createToggle("COMBAT", "Weave Glide", false, false, 4, function(state) FeatureState.WeaveGlide = state end)
-createToggle("COMBAT", "No Attack Delay", false, true, 5, function(state) FeatureState.NoAttackDelay = state end)
+createToggle("COMBAT", "No Attack Delay", false, true, 5, function(state)
+    FeatureState.NoAttackDelay = state
+    updateAnimationSpeeds()
+end)
 createToggle("COMBAT", "Legit Hit Through Stun", false, true, 6, function(state) FeatureState.LegitHitThroughStun = state end)
 
 createKeybind("COMBAT", "Weave Hotkey", "unbound", 7, function(key) FeatureState.WeaveHotkey = key end)
 
 createSectionHeader("COMBAT", "STOMP", 8)
-createToggle("COMBAT", "Auto Stomp", false, false, 9, function(state) FeatureState.AutoStomp = state end)
+createToggle("COMBAT", "Auto Stomp", false, false, 9, function(state)
+    FeatureState.AutoStomp = state
+    AutoStompState.button = findMobileStompButton()
+end)
 
 createSectionHeader("COMBAT", "MULTIPLIERS", 10)
 createSlider("COMBAT", "Hit Multiplier", 1, 10, 1, true, 11, function(val) FeatureState.HitMultiplier = val end)
@@ -1438,6 +1693,94 @@ createSlider("COMBAT", "KA Range", 1, 50, 15, true, 17, function(val) FeatureSta
 createSlider("COMBAT", "KA Speed", 1, 20, 5, true, 18, function(val) FeatureState.KASpeed = val end)
 createToggle("COMBAT", "KA Lowest Health", false, true, 19, function(state) FeatureState.KALowestHealth = state end)
 createToggle("COMBAT", "KA Predictive Aim", false, true, 20, function(state) FeatureState.KAPredictiveAim = state end)
+
+
+---------------------------------------------------------
+-- WORLD VISUALS (CLIENT-SIDE)
+---------------------------------------------------------
+local WorldState = {
+    Enabled = false,
+    UpgradeScale = 5,
+    Saturation = 0,
+    Contrast = 0,
+    Brightness = 0,
+    Sharpness = 0,
+    NoTrees = false,
+    NoGrass = false,
+    StretchRes = false,
+    ResolutionScale = 0.8
+}
+
+local worldOriginals = {}
+local worldScanClock = 0
+local worldCC
+
+local function applyWorldVisuals()
+    if not worldCC or not worldCC.Parent then
+        worldCC = Lighting:FindFirstChild("5SmooveWorldColor")
+        if not worldCC then
+            worldCC = Instance.new("ColorCorrectionEffect")
+            worldCC.Name = "5SmooveWorldColor"
+            worldCC.Parent = Lighting
+        end
+    end
+
+    if not WorldState.Enabled then
+        worldCC.Enabled = false
+        for obj, old in pairs(worldOriginals) do
+            if obj and obj.Parent then
+                pcall(function() obj.LocalTransparencyModifier = old end)
+            end
+        end
+        return
+    end
+
+    local scale = math.clamp((tonumber(WorldState.UpgradeScale) or 5) / 5, 0.2, 2)
+    worldCC.Enabled = true
+    worldCC.Saturation = math.clamp(WorldState.Saturation * scale, -1, 1)
+    worldCC.Contrast = math.clamp(
+        WorldState.Contrast * scale + WorldState.Sharpness * 0.08 * scale,
+        -1, 1
+    )
+    worldCC.Brightness = math.clamp(WorldState.Brightness * scale, -1, 1)
+
+    if os.clock() - worldScanClock < 0.5 then return end
+    worldScanClock = os.clock()
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local n = string.lower(obj.Name)
+            local tree = WorldState.NoTrees and (
+                n:find("tree", 1, true) or n:find("bush", 1, true) or
+                n:find("shrub", 1, true) or n:find("plant", 1, true)
+            )
+            local grass = WorldState.NoGrass and (
+                n:find("grass", 1, true) or n:find("foliage", 1, true)
+            )
+
+            if tree or grass then
+                if worldOriginals[obj] == nil then
+                    worldOriginals[obj] = obj.LocalTransparencyModifier
+                end
+                obj.LocalTransparencyModifier = 1
+            elseif worldOriginals[obj] ~= nil then
+                obj.LocalTransparencyModifier = worldOriginals[obj]
+                worldOriginals[obj] = nil
+            end
+        end
+    end
+end
+
+local function applyStretchRes()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    if not WorldState.StretchRes then
+        camera.FieldOfView = 70
+        return
+    end
+    local scale = math.clamp(tonumber(WorldState.ResolutionScale) or 0.8, 0.1, 1)
+    camera.FieldOfView = math.clamp(70 / math.max(scale, 0.35), 40, 100)
+end
 
 ---------------------------------------------------------
 -- POPULATING STATS TAB (PLAYER, CAMERA, VISUALS)
@@ -1460,10 +1803,24 @@ end)
 createSlider("STATS", "Weave Glide Strength", 1, 10, 2.2, false, 8, function(val) FeatureState.WeaveGlideStrength = val end)
 
 createSectionHeader("STATS", "CAMERA", 9)
-createToggle("STATS", "Stretched Res", false, false, 10, function(state) FeatureState.StretchedRes = state end)
-createSlider("STATS", "Resolution Scale", 0.1, 1.0, 0.8, false, 11, function(val) FeatureState.ResolutionScale = val end)
-createToggle("STATS", "Custom Sens", false, false, 12, function(state) FeatureState.CustomSens = state setCameraSensitivity() end)
-createSlider("STATS", "Sensitivity", 0.1, 10, 1.0, false, 13, function(val) FeatureState.Sensitivity = val setCameraSensitivity() end)
+createToggle("STATS", "Stretched Res", false, false, 10, function(state)
+    FeatureState.StretchedRes = state
+    WorldState.StretchRes = state
+    applyStretchRes()
+end)
+createSlider("STATS", "Resolution Scale", 0.1, 1.0, 0.8, false, 11, function(val)
+    FeatureState.ResolutionScale = val
+    WorldState.ResolutionScale = val
+    applyStretchRes()
+end)
+createToggle("STATS", "Custom Sens", false, false, 12, function(state)
+    FeatureState.CustomSens = state
+    setCameraSensitivity()
+end)
+createSlider("STATS", "Sensitivity", 0.1, 10, 1.0, false, 13, function(val)
+    FeatureState.Sensitivity = val
+    setCameraSensitivity()
+end)
 
 createSectionHeader("STATS", "VISUALS", 14)
 local defaultPalette = {
@@ -1476,6 +1833,44 @@ local defaultPalette = {
     Color3.fromRGB(20, 20, 20)
 }
 createColorPalette("STATS", "Hitbox Color", defaultPalette, 15, function(color) FeatureState.HitboxColor = color refreshTargetBoxes() end)
+
+
+---------------------------------------------------------
+-- POPULATING WORLD TAB
+---------------------------------------------------------
+createSectionHeader("WORLD", "WORLD VISUALS", 1)
+createToggle("WORLD", "World Visuals", false, false, 2, function(state)
+    WorldState.Enabled = state
+    applyWorldVisuals()
+end)
+createSlider("WORLD", "Upgrade Scale", 1, 10, 5, true, 3, function(val)
+    WorldState.UpgradeScale = val
+    applyWorldVisuals()
+end)
+createSlider("WORLD", "Saturation", -1, 1, 0, false, 4, function(val)
+    WorldState.Saturation = val
+    applyWorldVisuals()
+end)
+createSlider("WORLD", "Contrast", -1, 1, 0, false, 5, function(val)
+    WorldState.Contrast = val
+    applyWorldVisuals()
+end)
+createSlider("WORLD", "Brightness", -1, 1, 0, false, 6, function(val)
+    WorldState.Brightness = val
+    applyWorldVisuals()
+end)
+createSlider("WORLD", "Sharpness", 0, 10, 0, false, 7, function(val)
+    WorldState.Sharpness = val
+    applyWorldVisuals()
+end)
+createToggle("WORLD", "No Trees", false, false, 8, function(state)
+    WorldState.NoTrees = state
+    applyWorldVisuals()
+end)
+createToggle("WORLD", "No Grass", false, false, 9, function(state)
+    WorldState.NoGrass = state
+    applyWorldVisuals()
+end)
 
 ---------------------------------------------------------
 -- POPULATING UTILITY TAB
@@ -1891,6 +2286,15 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if FeatureState.UIToggleKey and input.KeyCode == FeatureState.UIToggleKey then
         MainFrame.Visible = not MainFrame.Visible
         updateMobileButton()
+    end
+end)
+
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent do
+        task.wait(0.5)
+        pcall(applyWorldVisuals)
+        pcall(applyStretchRes)
     end
 end)
 
