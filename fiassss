@@ -56,6 +56,45 @@ local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 8)
 MainCorner.Parent = MainFrame
 
+---------------------------------------------------------
+-- MOBILE TOGGLE
+-- Hides/shows MainFrame only; ScreenGui stays enabled so
+-- the button itself never disappears.
+---------------------------------------------------------
+local MobileToggle = Instance.new("TextButton")
+MobileToggle.Name = "MobileToggle"
+MobileToggle.Size = UDim2.new(0, 46, 0, 46)
+MobileToggle.Position = UDim2.new(0, 14, 0.5, -23)
+MobileToggle.BackgroundColor3 = THEME.CardBg
+MobileToggle.BackgroundTransparency = 0.05
+MobileToggle.BorderSizePixel = 0
+MobileToggle.Text = "5S"
+MobileToggle.TextColor3 = THEME.AccentGreen
+MobileToggle.Font = Enum.Font.GothamBlack
+MobileToggle.TextSize = 12
+MobileToggle.AutoButtonColor = false
+MobileToggle.ZIndex = 100
+MobileToggle.Parent = ScreenGui
+
+local MobileCorner = Instance.new("UICorner")
+MobileCorner.CornerRadius = UDim.new(1, 0)
+MobileCorner.Parent = MobileToggle
+
+local MobileStroke = Instance.new("UIStroke")
+MobileStroke.Color = THEME.AccentGreen
+MobileStroke.Thickness = 1
+MobileStroke.Parent = MobileToggle
+
+local function updateMobileButton()
+    MobileToggle.Text = MainFrame.Visible and "5S" or ">"
+end
+
+MobileToggle.Activated:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+    updateMobileButton()
+end)
+
+
 -- Draggable Functionality
 local dragging, dragInput, dragStart, startPos
 MainFrame.InputBegan:Connect(function(input)
@@ -1581,8 +1620,7 @@ end)
 createSectionHeader("UTILITY", "DANGER", 10)
 
 createActionButton("UTILITY", "Kill Switch", THEME.AccentRed, 11, function()
-    if MainFrame then MainFrame.Visible = false end
-    updateMobileButton()
+    ScreenGui:Destroy()
     if LocalPlayer and LocalPlayer.Character then
         local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if humanoid then
@@ -1851,9 +1889,8 @@ end)
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if FeatureState.UIToggleKey and input.KeyCode == FeatureState.UIToggleKey then
-        if ScreenGui then
-            ScreenGui.Enabled = not ScreenGui.Enabled
-        end
+        MainFrame.Visible = not MainFrame.Visible
+        updateMobileButton()
     end
 end)
 
