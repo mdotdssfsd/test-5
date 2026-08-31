@@ -1,4 +1,4 @@
--- Services
+
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -692,9 +692,13 @@ end
 ---------------------------------------------------------
 
 local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
 local Camera = workspace.CurrentCamera
 
 local FeatureState = {
+    PanicMode = false,
+    UIToggleKey = Enum.KeyCode.M,
+    SavedSpawnCFrame = nil,
     AntiWeaveStun = false,
     ShowHitbox = true,
     WeaveGlide = false,
@@ -717,8 +721,6 @@ local FeatureState = {
     HitboxSize = 1,
     PunchSpeed = false,
     PunchSpeedValue = 1.7,
-    LoopSpeed = false,
-    LoopSpeedValue = 1,
     DownHitSpeed = 1,
     WeaveGlideStrength = 2.2,
 
@@ -776,18 +778,20 @@ local function updateTargetBox(player)
     end
 
     local box = targetBoxes[player]
-    if not box then
+    if not box or not box.Parent then
         box = Instance.new("BoxHandleAdornment")
         box.Name = "Hitbox_" .. player.UserId
         box.Adornee = root
         box.AlwaysOnTop = true
-        box.ZIndex = 5
-        box.Transparency = 0.65
+        box.ZIndex = 10
+        box.Transparency = 0.45
         box.Parent = hitboxFolder
         targetBoxes[player] = box
     end
 
-    local size = math.clamp(2 * FeatureState.HitboxSize, 2, 20)
+    -- Re-assign Adornee every refresh so respawns are handled.
+    box.Adornee = root
+    local size = math.clamp(2.5 * FeatureState.HitboxSize, 2.5, 25)
     box.Size = Vector3.new(size, size, size)
     box.Color3 = FeatureState.HitboxColor
 end
@@ -798,37 +802,64 @@ local function refreshTargetBoxes()
     end
 end
 
-local function setCharacterWalkSpeed()
-    local humanoid = LocalPlayer and getHumanoid(LocalPlayer)
-    if humanoid then
-        if FeatureState.LoopSpeed then
-            humanoid.WalkSpeed = math.max(0, 16 * FeatureState.LoopSpeedValue)
-        else
-            humanoid.WalkSpeed = 16
-        end
-    end
-end
 
 local function setCameraSensitivity()
     -- Roblox does not expose a public writable Camera sensitivity property.
     -- Keep the selected value in FeatureState rather than pretending it changed.
 end
 
-local function updateAnimationSpeeds()
-    local humanoid = LocalPlayer and getHumanoid(LocalPlayer)
-    if not humanoid then
-        return
-    end
-
+local function getAnimationMultiplier()
     local multiplier = FeatureState.PunchSpeed and FeatureState.PunchSpeedValue or 1
     if FeatureState.NoAttackDelay then
         multiplier = math.max(multiplier, 2)
     end
+    return math.clamp(multiplier, 0.05, 20)
+end
+
+local function applyAnimationSpeed(track)
+    if not track then return end
+    pcall(function()
+        track:AdjustSpeed(getAnimationMultiplier())
+    end)
+end
+
+local animationConnection
+local function connectCharacterRuntime(character)
+    if animationConnection then
+        animationConnection:Disconnect()
+        animationConnection = nil
+    end
+
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    animationConnection = humanoid.AnimationPlayed:Connect(function(track)
+        task.defer(function()
+            applyAnimationSpeed(track)
+        end)
+    end)
 
     for _, track in ipairs(humanoid:GetPlayingAnimationTracks()) do
-        pcall(function()
-            track:AdjustSpeed(multiplier)
-        end)
+        applyAnimationSpeed(track)
+    end
+end
+
+local function updateAnimationSpeeds()
+    local humanoid = LocalPlayer and getHumanoid(LocalPlayer)
+    if not humanoid then return end
+
+    for _, track in ipairs(humanoid:GetPlayingAnimationTracks()) do
+        applyAnimationSpeed(track)
+    end
+end
+
+if LocalPlayer then
+    LocalPlayer.CharacterAdded:Connect(function(character)
+        task.wait(0.2)
+        connectCharacterRuntime(character)
+    end)
+    if LocalPlayer.Character then
+        connectCharacterRuntime(LocalPlayer.Character)
     end
 end
 
@@ -942,12 +973,400 @@ end)
 
 RunService.Heartbeat:Connect(function()
     refreshTargetBoxes()
-    setCharacterWalkSpeed()
     updateAnimationSpeeds()
     updateKillAuraTarget()
     updateGlide()
     refreshStatus()
 end)
+
+
+---------------------------------------------------------
+-- POPULATING CONFIGS TAB
+-- Screenshot-inspired config page with Save / Load / Refresh.
+-- Persists when the current environment exposes writefile/readfile.
+---------------------------------------------------------
+
+local CONFIG_FOLDER = "5SmooveHub/configs"
+local ConfigEntries = {}
+
+local function ensureConfigFolder()
+    if type(makefolder) ~= "function" then
+        return
+    end
+    pcall(makefolder, "5SmooveHub")
+    pcall(makefolder, CONFIG_FOLDER)
+end
+
+local function configFile(name)
+    local safe = tostring(name):gsub("[^%w%-%_ ]", ""):sub(1, 40)
+    if safe == "" then safe = "Default" end
+    return CONFIG_FOLDER .. "/" .. safe .. ".json"
+end
+
+local function encodeFeatureState()
+    local data = {}
+    for key, value in pairs(FeatureState) do
+        if typeof(value) == "Color3" then
+            data[key] = {
+                __type = "Color3",
+                r = value.R,
+                g = value.G,
+                b = value.B
+            }
+        elseif typeof(value) == "EnumItem" then
+            data[key] = {
+                __type = "EnumItem",
+                enum = tostring(value.EnumType),
+                name = value.Name
+            }
+        elseif type(value) == "boolean" or type(value) == "number" or type(value) == "string" then
+            data[key] = value
+        end
+    end
+    return HttpService:JSONEncode(data)
+end
+
+local function decodeFeatureState(raw)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not ok or type(data) ~= "table" then
+        return nil
+    end
+
+    local decoded = {}
+    for key, value in pairs(data) do
+        if type(value) == "table" and value.__type == "Color3" then
+            decoded[key] = Color3.new(
+                tonumber(value.r) or 1,
+                tonumber(value.g) or 1,
+                tonumber(value.b) or 1
+            )
+        elseif type(value) == "table" and value.__type == "EnumItem" then
+            local enumType = tostring(value.enum or "")
+            local enumName = tostring(value.name or "")
+            local enumTable = Enum[enumType:gsub("^Enum%.", "")]
+            if enumTable and enumTable[enumName] then
+                decoded[key] = enumTable[enumName]
+            end
+        else
+            decoded[key] = value
+        end
+    end
+    return decoded
+end
+
+local function applyConfigData(data)
+    if type(data) ~= "table" then return false end
+
+    for key, value in pairs(data) do
+        if FeatureState[key] ~= nil then
+            FeatureState[key] = value
+        end
+    end
+
+    -- Refresh the parts that have an immediate runtime effect.
+    if type(refreshTargetBoxes) == "function" then
+        refreshTargetBoxes()
+    end
+    if type(updateAnimationSpeeds) == "function" then
+        updateAnimationSpeeds()
+    end
+    if type(setCameraSensitivity) == "function" then
+        setCameraSensitivity()
+    end
+    return true
+end
+
+local ConfigTab = tabFrames["CONFIGS"]
+
+local ConfigHeader = Instance.new("TextLabel")
+ConfigHeader.Size = UDim2.new(1, 0, 0, 16)
+ConfigHeader.BackgroundTransparency = 1
+ConfigHeader.Text = "■ ■  CONFIG MANAGER"
+ConfigHeader.TextColor3 = THEME.AccentGreen
+ConfigHeader.Font = Enum.Font.GothamBold
+ConfigHeader.TextSize = 9
+ConfigHeader.TextXAlignment = Enum.TextXAlignment.Left
+ConfigHeader.LayoutOrder = 1
+ConfigHeader.Parent = ConfigTab
+
+local ConfigCard = Instance.new("Frame")
+ConfigCard.Size = UDim2.new(1, 0, 0, 104)
+ConfigCard.BackgroundColor3 = THEME.CardBg
+ConfigCard.BorderSizePixel = 0
+ConfigCard.LayoutOrder = 2
+ConfigCard.Parent = ConfigTab
+
+local ConfigCardCorner = Instance.new("UICorner")
+ConfigCardCorner.CornerRadius = UDim.new(0, 8)
+ConfigCardCorner.Parent = ConfigCard
+
+local ConfigTitle = Instance.new("TextLabel")
+ConfigTitle.Size = UDim2.new(1, -24, 0, 16)
+ConfigTitle.Position = UDim2.new(0, 12, 0, 10)
+ConfigTitle.BackgroundTransparency = 1
+ConfigTitle.Text = "CONFIG"
+ConfigTitle.TextColor3 = THEME.TextPrimary
+ConfigTitle.Font = Enum.Font.GothamBold
+ConfigTitle.TextSize = 10
+ConfigTitle.TextXAlignment = Enum.TextXAlignment.Left
+ConfigTitle.Parent = ConfigCard
+
+local ConfigSub = Instance.new("TextLabel")
+ConfigSub.Size = UDim2.new(1, -24, 0, 12)
+ConfigSub.Position = UDim2.new(0, 12, 0, 28)
+ConfigSub.BackgroundTransparency = 1
+ConfigSub.Text = "save your current settings to a profile"
+ConfigSub.TextColor3 = THEME.TextSecondary
+ConfigSub.Font = Enum.Font.Gotham
+ConfigSub.TextSize = 8
+ConfigSub.TextXAlignment = Enum.TextXAlignment.Left
+ConfigSub.Parent = ConfigCard
+
+local ConfigBox = Instance.new("TextBox")
+ConfigBox.Size = UDim2.new(1, -130, 0, 30)
+ConfigBox.Position = UDim2.new(0, 12, 0, 54)
+ConfigBox.BackgroundColor3 = THEME.DarkTrack
+ConfigBox.BorderSizePixel = 0
+ConfigBox.ClearTextOnFocus = false
+ConfigBox.PlaceholderText = "Config name..."
+ConfigBox.PlaceholderColor3 = THEME.TextSecondary
+ConfigBox.Text = "Default"
+ConfigBox.TextColor3 = THEME.TextPrimary
+ConfigBox.Font = Enum.Font.Gotham
+ConfigBox.TextSize = 10
+ConfigBox.TextXAlignment = Enum.TextXAlignment.Left
+ConfigBox.Parent = ConfigCard
+
+local ConfigBoxCorner = Instance.new("UICorner")
+ConfigBoxCorner.CornerRadius = UDim.new(0, 5)
+ConfigBoxCorner.Parent = ConfigBox
+
+local ConfigBoxPad = Instance.new("UIPadding")
+ConfigBoxPad.PaddingLeft = UDim.new(0, 10)
+ConfigBoxPad.Parent = ConfigBox
+
+local SaveConfigBtn = Instance.new("TextButton")
+SaveConfigBtn.Size = UDim2.new(0, 90, 0, 30)
+SaveConfigBtn.Position = UDim2.new(1, -102, 0, 54)
+SaveConfigBtn.BackgroundColor3 = Color3.fromRGB(105, 0, 210)
+SaveConfigBtn.BorderSizePixel = 0
+SaveConfigBtn.Text = "SAVE"
+SaveConfigBtn.TextColor3 = THEME.TextPrimary
+SaveConfigBtn.Font = Enum.Font.GothamBold
+SaveConfigBtn.TextSize = 9
+SaveConfigBtn.Parent = ConfigCard
+
+local SaveCorner = Instance.new("UICorner")
+SaveCorner.CornerRadius = UDim.new(0, 5)
+SaveCorner.Parent = SaveConfigBtn
+
+local ConfigStatus = Instance.new("TextLabel")
+ConfigStatus.Size = UDim2.new(1, -24, 0, 12)
+ConfigStatus.Position = UDim2.new(0, 12, 1, -17)
+ConfigStatus.BackgroundTransparency = 1
+ConfigStatus.Text = "READY"
+ConfigStatus.TextColor3 = THEME.TextSecondary
+ConfigStatus.Font = Enum.Font.Gotham
+ConfigStatus.TextSize = 8
+ConfigStatus.TextXAlignment = Enum.TextXAlignment.Left
+ConfigStatus.Parent = ConfigCard
+
+local ConfigListHeader = Instance.new("TextLabel")
+ConfigListHeader.Size = UDim2.new(1, -70, 0, 16)
+ConfigListHeader.BackgroundTransparency = 1
+ConfigListHeader.Text = "SAVED CONFIGS"
+ConfigListHeader.TextColor3 = THEME.TextPrimary
+ConfigListHeader.Font = Enum.Font.GothamBold
+ConfigListHeader.TextSize = 9
+ConfigListHeader.TextXAlignment = Enum.TextXAlignment.Left
+ConfigListHeader.LayoutOrder = 3
+ConfigListHeader.Parent = ConfigTab
+
+local RefreshConfigsBtn = Instance.new("TextButton")
+RefreshConfigsBtn.Size = UDim2.new(0, 60, 0, 20)
+RefreshConfigsBtn.Position = UDim2.new(1, -60, 0, 0)
+RefreshConfigsBtn.BackgroundColor3 = THEME.DarkTrack
+RefreshConfigsBtn.BorderSizePixel = 0
+RefreshConfigsBtn.Text = "REFRESH"
+RefreshConfigsBtn.TextColor3 = THEME.TextSecondary
+RefreshConfigsBtn.Font = Enum.Font.GothamBold
+RefreshConfigsBtn.TextSize = 7
+RefreshConfigsBtn.Parent = ConfigListHeader
+
+local RefreshConfigsCorner = Instance.new("UICorner")
+RefreshConfigsCorner.CornerRadius = UDim.new(0, 4)
+RefreshConfigsCorner.Parent = RefreshConfigsBtn
+
+local ConfigList = Instance.new("Frame")
+ConfigList.Size = UDim2.new(1, 0, 0, 150)
+ConfigList.BackgroundTransparency = 1
+ConfigList.LayoutOrder = 4
+ConfigList.Parent = ConfigTab
+
+local ConfigListLayout = Instance.new("UIListLayout")
+ConfigListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ConfigListLayout.Padding = UDim.new(0, 6)
+ConfigListLayout.Parent = ConfigList
+
+local function clearConfigCards()
+    for _, child in ipairs(ConfigList:GetChildren()) do
+        if child:IsA("Frame") then
+            child:Destroy()
+        end
+    end
+end
+
+local function loadConfigNames()
+    local names = {}
+    names["Default"] = true
+
+    if type(listfiles) == "function" then
+        local ok, files = pcall(listfiles, CONFIG_FOLDER)
+        if ok and type(files) == "table" then
+            for _, file in ipairs(files) do
+                local name = tostring(file):match("([^/\\]+)%.json$")
+                if name and name ~= "" then
+                    names[name] = true
+                end
+            end
+        end
+    end
+
+    return names
+end
+
+local function createConfigCard(name)
+    local Card = Instance.new("Frame")
+    Card.Size = UDim2.new(1, 0, 0, 44)
+    Card.BackgroundColor3 = THEME.CardBg
+    Card.BorderSizePixel = 0
+    Card.Parent = ConfigList
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 6)
+    Corner.Parent = Card
+
+    local Name = Instance.new("TextLabel")
+    Name.Size = UDim2.new(0.55, 0, 1, 0)
+    Name.Position = UDim2.new(0, 12, 0, 0)
+    Name.BackgroundTransparency = 1
+    Name.Text = name
+    Name.TextColor3 = THEME.TextPrimary
+    Name.Font = Enum.Font.GothamBold
+    Name.TextSize = 9
+    Name.TextXAlignment = Enum.TextXAlignment.Left
+    Name.Parent = Card
+
+    local Load = Instance.new("TextButton")
+    Load.Size = UDim2.new(0, 55, 0, 24)
+    Load.Position = UDim2.new(1, -120, 0.5, -12)
+    Load.BackgroundColor3 = THEME.DarkTrack
+    Load.BorderSizePixel = 0
+    Load.Text = "LOAD"
+    Load.TextColor3 = THEME.AccentGreen
+    Load.Font = Enum.Font.GothamBold
+    Load.TextSize = 8
+    Load.Parent = Card
+
+    local LoadCorner = Instance.new("UICorner")
+    LoadCorner.CornerRadius = UDim.new(0, 4)
+    LoadCorner.Parent = Load
+
+    local Save = Instance.new("TextButton")
+    Save.Size = UDim2.new(0, 55, 0, 24)
+    Save.Position = UDim2.new(1, -60, 0.5, -12)
+    Save.BackgroundColor3 = THEME.DarkTrack
+    Save.BorderSizePixel = 0
+    Save.Text = "SAVE"
+    Save.TextColor3 = THEME.TextPrimary
+    Save.Font = Enum.Font.GothamBold
+    Save.TextSize = 8
+    Save.Parent = Card
+
+    local SaveCorner = Instance.new("UICorner")
+    SaveCorner.CornerRadius = UDim.new(0, 4)
+    SaveCorner.Parent = Save
+
+    Load.MouseButton1Click:Connect(function()
+        local file = configFile(name)
+        if type(readfile) == "function" then
+            local ok, raw = pcall(readfile, file)
+            if ok and raw then
+                local data = decodeFeatureState(raw)
+                if applyConfigData(data) then
+                    ConfigStatus.Text = "LOADED: " .. name
+                    ConfigStatus.TextColor3 = THEME.AccentGreen
+                    return
+                end
+            end
+        end
+        ConfigStatus.Text = "NO SAVED FILE: " .. name
+        ConfigStatus.TextColor3 = THEME.TextSecondary
+    end)
+
+    Save.MouseButton1Click:Connect(function()
+        local file = configFile(name)
+        ensureConfigFolder()
+        if type(writefile) == "function" then
+            local ok = pcall(writefile, file, encodeFeatureState())
+            ConfigStatus.Text = ok and ("SAVED: " .. name) or "SAVE FAILED"
+            ConfigStatus.TextColor3 = ok and THEME.AccentGreen or THEME.AccentRed
+        else
+            ConfigStatus.Text = "FILESYSTEM NOT AVAILABLE"
+            ConfigStatus.TextColor3 = THEME.TextSecondary
+        end
+    end)
+end
+
+local function refreshConfigList()
+    clearConfigCards()
+    local names = loadConfigNames()
+    local ordered = {}
+    for name in pairs(names) do
+        table.insert(ordered, name)
+    end
+    table.sort(ordered, function(a, b)
+        if a == "Default" then return true end
+        if b == "Default" then return false end
+        return a:lower() < b:lower()
+    end)
+
+    for _, name in ipairs(ordered) do
+        createConfigCard(name)
+    end
+
+    ConfigList.Size = UDim2.new(1, 0, 0, math.max(44, (#ordered * 50)))
+end
+
+SaveConfigBtn.MouseButton1Click:Connect(function()
+    local name = ConfigBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" then
+        ConfigStatus.Text = "ENTER A CONFIG NAME"
+        ConfigStatus.TextColor3 = THEME.AccentRed
+        return
+    end
+
+    ensureConfigFolder()
+    if type(writefile) == "function" then
+        local ok = pcall(writefile, configFile(name), encodeFeatureState())
+        if ok then
+            ConfigStatus.Text = "SAVED: " .. name
+            ConfigStatus.TextColor3 = THEME.AccentGreen
+            refreshConfigList()
+        else
+            ConfigStatus.Text = "SAVE FAILED"
+            ConfigStatus.TextColor3 = THEME.AccentRed
+        end
+    else
+        ConfigStatus.Text = "FILESYSTEM NOT AVAILABLE"
+        ConfigStatus.TextColor3 = THEME.TextSecondary
+    end
+end)
+
+RefreshConfigsBtn.MouseButton1Click:Connect(refreshConfigList)
+refreshConfigList()
 
 ---------------------------------------------------------
 -- POPULATING COMBAT TAB FEATURES
@@ -955,7 +1374,7 @@ end)
 
 createSectionHeader("COMBAT", "CORE", 1)
 createToggle("COMBAT", "Anti Weave Stun", false, false, 2, function(state) FeatureState.AntiWeaveStun = state end)
-createToggle("COMBAT", "Show Hitbox", true, false, 3, function(state) FeatureState.ShowHitbox = state end)
+createToggle("COMBAT", "Show Hitbox", true, false, 3, function(state) FeatureState.ShowHitbox = state refreshTargetBoxes() end)
 createToggle("COMBAT", "Weave Glide", false, false, 4, function(state) FeatureState.WeaveGlide = state end)
 createToggle("COMBAT", "No Attack Delay", false, true, 5, function(state) FeatureState.NoAttackDelay = state end)
 createToggle("COMBAT", "Legit Hit Through Stun", false, true, 6, function(state) FeatureState.LegitHitThroughStun = state end)
@@ -983,12 +1402,9 @@ createToggle("COMBAT", "KA Predictive Aim", false, true, 20, function(state) Fea
 ---------------------------------------------------------
 
 createSectionHeader("STATS", "PLAYER", 1)
-createSlider("STATS", "Hitbox Size", 1, 10, 1, false, 2, function(val) FeatureState.HitboxSize = val end)
+createSlider("STATS", "Hitbox Size", 1, 10, 1, false, 2, function(val) FeatureState.HitboxSize = val refreshTargetBoxes() end)
 createToggle("STATS", "Punch Speed", false, false, 3, function(state) FeatureState.PunchSpeed = state end)
-createSlider("STATS", "Punch Speed Value", 1, 10, 1.7, false, 4, function(val) FeatureState.PunchSpeedValue = val end)
-createToggle("STATS", "LoopSpeed", false, false, 5, function(state) FeatureState.LoopSpeed = state end)
-createSlider("STATS", "LoopSpeed Value", 1, 10, 1, false, 6, function(val) FeatureState.LoopSpeedValue = val end)
-createSlider("STATS", "Down Hit Speed", 1, 10, 1, true, 7, function(val) FeatureState.DownHitSpeed = val end)
+createSlider("STATS", "Punch Speed Value", 1, 10, 1.7, false, 4, function(val) FeatureState.PunchSpeedValue = val end)createSlider("STATS", "Down Hit Speed", 1, 10, 1, true, 7, function(val) FeatureState.DownHitSpeed = val end)
 createSlider("STATS", "Weave Glide Strength", 1, 10, 2.2, false, 8, function(val) FeatureState.WeaveGlideStrength = val end)
 
 createSectionHeader("STATS", "CAMERA", 9)
@@ -1007,19 +1423,151 @@ local defaultPalette = {
     Color3.fromRGB(255, 255, 255),
     Color3.fromRGB(20, 20, 20)
 }
-createColorPalette("STATS", "Hitbox Color", defaultPalette, 15, function(color) FeatureState.HitboxColor = color end)
+createColorPalette("STATS", "Hitbox Color", defaultPalette, 15, function(color) FeatureState.HitboxColor = color refreshTargetBoxes() end)
 
 ---------------------------------------------------------
--- POPULATING UTILITY TAB (UNLOAD & SAFE KILL SWITCH)
+-- POPULATING UTILITY TAB
+-- Screenshot-inspired utility controls.
 ---------------------------------------------------------
 
-createSectionHeader("UTILITY", "GUI CONTROLS", 1)
+createSectionHeader("UTILITY", "SETTINGS", 1)
 
-createActionButton("UTILITY", "Unload GUI", THEME.CardBg, 2, function()
-    ScreenGui:Destroy()
+createToggle("UTILITY", "Panic Mode", false, false, 2, function(state)
+    FeatureState.PanicMode = state
+    if ScreenGui then
+        ScreenGui.Enabled = not state
+    end
 end)
 
-createActionButton("UTILITY", "Safe Kill Switch", THEME.AccentRed, 3, function()
+createKeybind("UTILITY", "UI Toggle Key", "M", 3, function(key)
+    FeatureState.UIToggleKey = key
+end)
+
+createSectionHeader("UTILITY", "SERVER", 4)
+
+createActionButton("UTILITY", "Rejoin Server", THEME.CardBg, 5, function()
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end)
+
+createActionButton("UTILITY", "Hop Server", THEME.CardBg, 6, function()
+    -- Best-effort: Roblox's public client API does not expose a guaranteed
+    -- random-server picker. Teleporting to the current place lets Roblox
+    -- assign a fresh server when a new instance is needed.
+    pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+end)
+
+createSectionHeader("UTILITY", "LOCATION", 7)
+
+local LocationRow = Instance.new("Frame")
+LocationRow.Size = UDim2.new(1, 0, 0, 34)
+LocationRow.BackgroundTransparency = 1
+LocationRow.LayoutOrder = 8
+LocationRow.Parent = tabFrames["UTILITY"]
+
+local LocationBox = Instance.new("TextBox")
+LocationBox.Size = UDim2.new(0.55, -6, 0, 28)
+LocationBox.Position = UDim2.new(0, 0, 0.5, -14)
+LocationBox.BackgroundColor3 = THEME.CardBg
+LocationBox.BorderSizePixel = 0
+LocationBox.ClearTextOnFocus = false
+LocationBox.PlaceholderText = "Location / Part name"
+LocationBox.PlaceholderColor3 = THEME.TextSecondary
+LocationBox.Text = ""
+LocationBox.TextColor3 = THEME.TextPrimary
+LocationBox.Font = Enum.Font.Gotham
+LocationBox.TextSize = 9
+LocationBox.TextXAlignment = Enum.TextXAlignment.Left
+LocationBox.Parent = LocationRow
+
+local LocationCorner = Instance.new("UICorner")
+LocationCorner.CornerRadius = UDim.new(0, 5)
+LocationCorner.Parent = LocationBox
+
+local LocationPad = Instance.new("UIPadding")
+LocationPad.PaddingLeft = UDim.new(0, 9)
+LocationPad.Parent = LocationBox
+
+local TeleportBtn = Instance.new("TextButton")
+TeleportBtn.Size = UDim2.new(0.22, -4, 0, 28)
+TeleportBtn.Position = UDim2.new(0.55, 4, 0.5, -14)
+TeleportBtn.BackgroundColor3 = Color3.fromRGB(105, 0, 210)
+TeleportBtn.BorderSizePixel = 0
+TeleportBtn.Text = "TELEPORT"
+TeleportBtn.TextColor3 = THEME.TextPrimary
+TeleportBtn.Font = Enum.Font.GothamBold
+TeleportBtn.TextSize = 8
+TeleportBtn.Parent = LocationRow
+
+local TeleportCorner = Instance.new("UICorner")
+TeleportCorner.CornerRadius = UDim.new(0, 5)
+TeleportCorner.Parent = TeleportBtn
+
+local SetSpawnBtn = Instance.new("TextButton")
+SetSpawnBtn.Size = UDim2.new(0.23, -4, 0, 28)
+SetSpawnBtn.Position = UDim2.new(0.77, 4, 0.5, -14)
+SetSpawnBtn.BackgroundColor3 = THEME.CardBg
+SetSpawnBtn.BorderSizePixel = 0
+SetSpawnBtn.Text = "SET SPAWN"
+SetSpawnBtn.TextColor3 = THEME.TextSecondary
+SetSpawnBtn.Font = Enum.Font.GothamBold
+SetSpawnBtn.TextSize = 8
+SetSpawnBtn.Parent = LocationRow
+
+local SetSpawnCorner = Instance.new("UICorner")
+SetSpawnCorner.CornerRadius = UDim.new(0, 5)
+SetSpawnCorner.Parent = SetSpawnBtn
+
+local function findLocationPart(name)
+    if not name or name:gsub("%s", "") == "" then return nil end
+    local wanted = name:lower()
+    local exact = workspace:FindFirstChild(name, true)
+    if exact and exact:IsA("BasePart") then
+        return exact
+    end
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name:lower() == wanted then
+            return obj
+        end
+    end
+    return nil
+end
+
+TeleportBtn.MouseButton1Click:Connect(function()
+    local root = getRoot(LocalPlayer)
+    local part = findLocationPart(LocationBox.Text)
+    if root and part then
+        root.CFrame = part.CFrame + Vector3.new(0, 3, 0)
+    end
+end)
+
+SetSpawnBtn.MouseButton1Click:Connect(function()
+    local root = getRoot(LocalPlayer)
+    if root then
+        FeatureState.SavedSpawnCFrame = root.CFrame
+        SetSpawnBtn.Text = "SPAWN SET"
+        task.delay(1.2, function()
+            if SetSpawnBtn and SetSpawnBtn.Parent then
+                SetSpawnBtn.Text = "SET SPAWN"
+            end
+        end)
+    end
+end)
+
+createActionButton("UTILITY", "Teleport To Saved Spawn", THEME.CardBg, 9, function()
+    local root = getRoot(LocalPlayer)
+    if root and FeatureState.SavedSpawnCFrame then
+        root.CFrame = FeatureState.SavedSpawnCFrame
+    end
+end)
+
+createSectionHeader("UTILITY", "DANGER", 10)
+
+createActionButton("UTILITY", "Kill Switch", THEME.AccentRed, 11, function()
     ScreenGui:Destroy()
     if LocalPlayer and LocalPlayer.Character then
         local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
@@ -1282,6 +1830,16 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
     if FeatureState.WeaveHotkey and input.KeyCode == FeatureState.WeaveHotkey then
         FeatureState.WeaveGlide = not FeatureState.WeaveGlide
+    end
+end)
+
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if FeatureState.UIToggleKey and input.KeyCode == FeatureState.UIToggleKey then
+        if ScreenGui then
+            ScreenGui.Enabled = not ScreenGui.Enabled
+        end
     end
 end)
 
